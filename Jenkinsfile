@@ -1,6 +1,10 @@
 pipeline {
   agent any
 
+  parameters {
+    booleanParam(name: 'DEBUG_HOLD', defaultValue: false, description: 'Pause before cleanup to debug networking')
+  }
+
   environment {
     IMAGE   = 'ubuntu-24.04'
     FLAVOR  = 'dev.medium'
@@ -98,6 +102,9 @@ pipeline {
 
             echo "=== Ports for $VM_NAME (table) ==="
             openstack port list --server "$VM_NAME" -f table || true
+
+            echo "=== Server show (key fields) ==="
+            openstack server show "$VM_NAME" -c status -c addresses -c security_groups -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
           '''
         }
       }
@@ -157,7 +164,7 @@ pipeline {
             IP=$(cat vm_ip.txt)
 
             echo "=== Server show (key fields) ==="
-            openstack server show "$VM_NAME" -c status -c addresses -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
+            openstack server show "$VM_NAME" -c status -c addresses -c security_groups -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
 
             echo "=== Port list for server (table) ==="
             openstack port list --server "$VM_NAME" -f table || true
@@ -189,16 +196,37 @@ pipeline {
           echo "Target IP: $IP"
 
           echo "=== Local (Jenkins VM) ==="
+          whoami || true
+          pwd || true
           ip a || true
           ip route || true
+
+          # Determine egress iface to the VM IP (safer than hardcoding ens3)
+          IFACE=$(ip route get "$IP" 2>/dev/null | awk '/dev/ {for (i=1;i<=NF;i++) if ($i=="dev"){print $(i+1); exit}}' || true)
+          IFACE="${IFACE:-ens3}"
+          echo "Using IFACE=$IFACE for ARP probe"
+
+          # Make sure arping exists (no-op if already installed)
+          if ! command -v arping >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y iputils-arping
+          fi
 
           test -f "$SSH_KEY"
           chmod 600 "$SSH_KEY"
 
           echo "Waiting for SSH on $IP..."
-          for i in {1..40}; do
+          for i in {1..120}; do
+            echo "---- try $i ----"
+            echo "[neigh]"
+            ip neigh show | grep -E "$IP|FAILED|INCOMPLETE" || true
+
+            echo "[arping]"
+            arping -c 1 -I "$IFACE" "$IP" || true
+
             if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK' ; then
+                  -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK' ; then
+              echo "SSH is up"
               break
             fi
             sleep 5
@@ -206,33 +234,44 @@ pipeline {
 
           # hard fail if still not reachable
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
+              -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
 
           tar -czf repo.tgz .
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
+              -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
 
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i "$SSH_KEY" "$SSH_USER@$IP" '
-              set -euxo pipefail
-              sudo apt-get update
-              sudo apt-get install -y python3-venv python3-pip
+              -i "$SSH_KEY" "$SSH_USER@$IP" '
+                set -euxo pipefail
+                sudo apt-get update
+                sudo apt-get install -y python3-venv python3-pip
 
-              mkdir -p ~/work && cd ~/work
-              tar -xzf /tmp/repo.tgz
+                mkdir -p ~/work && cd ~/work
+                tar -xzf /tmp/repo.tgz
 
-              python3 -m venv .venv
-              . .venv/bin/activate
-              pip install -U pip
-              pip install -r requirements.txt
+                python3 -m venv .venv
+                . .venv/bin/activate
+                pip install -U pip
+                pip install -r requirements.txt
 
-              mkdir -p reports
-              pytest -q --junitxml=reports/junit.xml
-            '
+                mkdir -p reports
+                pytest -q --junitxml=reports/junit.xml
+              '
 
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
+              -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
         '''
+      }
+    }
+
+    stage('DEBUG HOLD (pause before cleanup)') {
+      when { expression { return params.DEBUG_HOLD } }
+      steps {
+        script {
+          def vm = sh(script: "cat vm_name.txt 2>/dev/null || true", returnStdout: true).trim()
+          def ip = sh(script: "cat vm_ip.txt 2>/dev/null || true", returnStdout: true).trim()
+          input message: "DEBUG_HOLD enabled. VM is still alive.\nVM=${vm}\nIP=${ip}\nPress Continue to allow cleanup."
+        }
       }
     }
   }
@@ -252,6 +291,13 @@ pipeline {
 
       junit testResults: 'reports/junit.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+
+      script {
+        if (params.DEBUG_HOLD) {
+          echo "DEBUG_HOLD=true -> skipping VM delete in post. Delete manually when done."
+          return
+        }
+      }
 
       withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
         sh '''#!/usr/bin/env bash
