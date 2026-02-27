@@ -299,20 +299,20 @@ pipeline {
         }
       }
 
-      withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
-        sh '''#!/usr/bin/env bash
-          set +e
-          cp "$OPENRC" openrc.sh 2>/dev/null
-          chmod 600 openrc.sh 2>/dev/null
-          source ./openrc.sh 2>/dev/null
+      // withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
+      //   sh '''#!/usr/bin/env bash
+      //     set +e
+      //     cp "$OPENRC" openrc.sh 2>/dev/null
+      //     chmod 600 openrc.sh 2>/dev/null
+      //     source ./openrc.sh 2>/dev/null
 
-          if [[ -f vm_name.txt ]]; then
-            VM_NAME=$(cat vm_name.txt)
-            echo "Deleting $VM_NAME"
-            openstack server delete "$VM_NAME" || true
-          fi
-        '''
-      }
+      //     if [[ -f vm_name.txt ]]; then
+      //       VM_NAME=$(cat vm_name.txt)
+      //       echo "Deleting $VM_NAME"
+      //       openstack server delete "$VM_NAME" || true
+      //     fi
+      //   '''
+      // }
     }
   }
 }
