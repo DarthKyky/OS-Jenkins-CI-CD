@@ -208,8 +208,8 @@ pipeline {
 
           # Make sure arping exists (no-op if already installed)
           if ! command -v arping >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y iputils-arping
+            sudo -n apt-get update
+            sudo -n apt-get install -y python3-venv python3-pip python3-pytest
           fi
 
           test -f "$SSH_KEY"
