@@ -9,9 +9,23 @@ pipeline {
 
     SSH_USER = 'ubuntu'
     SSH_KEY  = "${env.HOME}/.ssh/devteam"
+
+    CI_SG_NAME = 'ci-ssh'
+    CI_CIDR    = '10.20.0.0/24'
   }
 
   stages {
+
+    stage('Init') {
+      steps {
+        sh '''#!/usr/bin/env bash
+          set -euxo pipefail
+          rm -f vm_name.txt vm_ip.txt openrc.sh repo.tgz || true
+          rm -rf reports || true
+          mkdir -p reports
+        '''
+      }
+    }
 
     stage('Checkout') {
       steps {
@@ -20,11 +34,34 @@ pipeline {
       }
     }
 
+    stage('Ensure CI Security Group') {
+      steps {
+        withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
+          sh '''#!/usr/bin/env bash
+            set -euxo pipefail
+            cp "$OPENRC" openrc.sh
+            chmod 600 openrc.sh
+            source ./openrc.sh
+
+            if ! openstack security group show "$CI_SG_NAME" >/dev/null 2>&1; then
+              openstack security group create "$CI_SG_NAME" --description "CI: allow SSH+ICMP from ${CI_CIDR}"
+            fi
+
+            openstack security group rule create --ingress --ethertype IPv4 --protocol icmp --remote-ip "$CI_CIDR" "$CI_SG_NAME" || true
+            openstack security group rule create --ingress --ethertype IPv4 --protocol tcp --dst-port 22 --remote-ip "$CI_CIDR" "$CI_SG_NAME" || true
+
+            echo "=== SG $CI_SG_NAME rules ==="
+            openstack security group rule list "$CI_SG_NAME"
+          '''
+        }
+      }
+    }
+
     stage('Create ephemeral VM') {
       steps {
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
-            set -euo pipefail
+            set -euxo pipefail
 
             cp "$OPENRC" openrc.sh
             chmod 600 openrc.sh
@@ -38,6 +75,7 @@ pipeline {
               --flavor "$FLAVOR" \
               --network "$NETWORK" \
               --key-name "$KEYPAIR" \
+              --security-group "$CI_SG_NAME" \
               "$VM_NAME"
 
             for i in {1..60}; do
@@ -57,6 +95,9 @@ pipeline {
               openstack server show "$VM_NAME"
               exit 1
             fi
+
+            echo "=== Ports for $VM_NAME (table) ==="
+            openstack port list --server "$VM_NAME" -f table || true
           '''
         }
       }
@@ -66,7 +107,7 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
-            set -euo pipefail
+            set -euxo pipefail
 
             cp "$OPENRC" openrc.sh
             chmod 600 openrc.sh
@@ -78,17 +119,11 @@ pipeline {
 
             for i in {1..60}; do
               RAW=$(openstack server show "$VM_NAME" -f json -c addresses)
-              IP=$(echo "$RAW" | jq -r --arg net "$NETWORK" '
-                (.addresses[$net][0] // .addresses) | tostring
-              ')
+              IP=$(echo "$RAW" | jq -r --arg net "$NETWORK" '(.addresses[$net][0] // .addresses) | tostring')
 
-              # if it's like "devnet=10.20.0.109"
-              if [[ "$IP" == *"="* ]]; then
-                IP="${IP##*=}"
-              fi
+              if [[ "$IP" == *"="* ]]; then IP="${IP##*=}"; fi
 
               echo "ip=$IP"
-
               if [[ "$IP" != "null" && -n "$IP" ]]; then
                 echo "$IP" > vm_ip.txt
                 break
@@ -99,8 +134,47 @@ pipeline {
             if [[ ! -s vm_ip.txt ]]; then
               echo "Timeout waiting for IP"
               openstack server show "$VM_NAME"
+              echo "=== Ports debug ==="
+              openstack port list --server "$VM_NAME" -f table || true
               exit 1
             fi
+          '''
+        }
+      }
+    }
+
+    stage('Debug Neutron port + console log') {
+      steps {
+        withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
+          sh '''#!/usr/bin/env bash
+            set -euxo pipefail
+
+            cp "$OPENRC" openrc.sh
+            chmod 600 openrc.sh
+            source ./openrc.sh
+
+            VM_NAME=$(cat vm_name.txt)
+            IP=$(cat vm_ip.txt)
+
+            echo "=== Server show (key fields) ==="
+            openstack server show "$VM_NAME" -c status -c addresses -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
+
+            echo "=== Port list for server (table) ==="
+            openstack port list --server "$VM_NAME" -f table || true
+
+            PORT_ID=$(openstack port list --server "$VM_NAME" -f value -c ID | head -n1 || true)
+            echo "PORT_ID=$PORT_ID"
+
+            if [[ -n "$PORT_ID" ]]; then
+              echo "=== Port show (yaml) ==="
+              openstack port show "$PORT_ID" -f yaml || true
+            fi
+
+            echo "=== Console log (last 120 lines) ==="
+            openstack console log show "$VM_NAME" | tail -n 120 || true
+
+            echo "=== From Jenkins VM: ping $IP ==="
+            ping -c 2 "$IP" || true
           '''
         }
       }
@@ -114,13 +188,9 @@ pipeline {
           IP=$(cat vm_ip.txt)
           echo "Target IP: $IP"
 
-          echo "=== Local debug (Jenkins VM) ==="
-          whoami
-          pwd
-          ls -la
+          echo "=== Local (Jenkins VM) ==="
           ip a || true
           ip route || true
-          ping -c 2 "$IP" || true
 
           test -f "$SSH_KEY"
           chmod 600 "$SSH_KEY"
@@ -134,16 +204,14 @@ pipeline {
             sleep 5
           done
 
-          # Hard fail if SSH is still not reachable
+          # hard fail if still not reachable
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
 
-          # ship repo to VM
           tar -czf repo.tgz .
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
 
-          # run tests (pytest is in requirements.txt)
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -i "$SSH_KEY" "$SSH_USER@$IP" '
               set -euxo pipefail
@@ -162,8 +230,6 @@ pipeline {
               pytest -q --junitxml=reports/junit.xml
             '
 
-          # pull junit report back to Jenkins
-          rm -rf reports && mkdir -p reports
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
             -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
         '''
