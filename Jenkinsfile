@@ -12,7 +12,8 @@ pipeline {
     KEYPAIR = 'devteam-key'
 
     SSH_USER = 'ubuntu'
-    SSH_KEY  = "${env.HOME}/.ssh/devteam"
+    // ВАЖЛИВО: ключ має бути доступний саме юзеру jenkins
+    SSH_KEY  = '/var/lib/jenkins/.ssh/devteam'
 
     CI_SG_NAME = 'ci-ssh'
     CI_CIDR    = '10.20.0.0/24'
@@ -88,7 +89,7 @@ pipeline {
               if [[ "$STATUS" == "ACTIVE" ]]; then break; fi
               if [[ "$STATUS" == "ERROR" ]]; then
                 echo "VM entered ERROR state"
-                openstack server show "$VM_NAME"
+                openstack server show "$VM_NAME" -f yaml || true
                 exit 1
               fi
               sleep 5
@@ -96,15 +97,12 @@ pipeline {
 
             if [[ "$(openstack server show "$VM_NAME" -f value -c status)" != "ACTIVE" ]]; then
               echo "Timeout waiting for ACTIVE"
-              openstack server show "$VM_NAME"
+              openstack server show "$VM_NAME" -f yaml || true
               exit 1
             fi
 
             echo "=== Ports for $VM_NAME (table) ==="
             openstack port list --server "$VM_NAME" -f table || true
-
-            echo "=== Server show (key fields) ==="
-            openstack server show "$VM_NAME" -c status -c addresses -c security_groups -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
           '''
         }
       }
@@ -123,11 +121,11 @@ pipeline {
             VM_NAME=$(cat vm_name.txt)
 
             echo "Waiting for IP..."
-
             for i in {1..60}; do
               RAW=$(openstack server show "$VM_NAME" -f json -c addresses)
               IP=$(echo "$RAW" | jq -r --arg net "$NETWORK" '(.addresses[$net][0] // .addresses) | tostring')
 
+              # інколи OpenStack показує ip_address='x.x.x.x'
               if [[ "$IP" == *"="* ]]; then IP="${IP##*=}"; fi
 
               echo "ip=$IP"
@@ -140,7 +138,7 @@ pipeline {
 
             if [[ ! -s vm_ip.txt ]]; then
               echo "Timeout waiting for IP"
-              openstack server show "$VM_NAME"
+              openstack server show "$VM_NAME" -f yaml || true
               echo "=== Ports debug ==="
               openstack port list --server "$VM_NAME" -f table || true
               exit 1
@@ -164,7 +162,7 @@ pipeline {
             IP=$(cat vm_ip.txt)
 
             echo "=== Server show (key fields) ==="
-            openstack server show "$VM_NAME" -c status -c addresses -c security_groups -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
+            openstack server show "$VM_NAME" -c status -c addresses -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
 
             echo "=== Port list for server (table) ==="
             openstack port list --server "$VM_NAME" -f table || true
@@ -180,7 +178,7 @@ pipeline {
             echo "=== Console log (last 120 lines) ==="
             openstack console log show "$VM_NAME" | tail -n 120 || true
 
-            echo "=== From Jenkins VM: ping $IP ==="
+            echo "=== From Jenkins (service user context may differ): ping $IP ==="
             ping -c 2 "$IP" || true
           '''
         }
@@ -197,35 +195,29 @@ pipeline {
 
           echo "=== Local (Jenkins VM) ==="
           whoami || true
-          pwd || true
           ip a || true
           ip route || true
-
-          # Determine egress iface to the VM IP (safer than hardcoding ens3)
-          IFACE=$(ip route get "$IP" 2>/dev/null | awk '/dev/ {for (i=1;i<=NF;i++) if ($i=="dev"){print $(i+1); exit}}' || true)
-          IFACE="${IFACE:-ens3}"
-          echo "Using IFACE=$IFACE for ARP probe"
-
-          # Make sure arping exists (no-op if already installed)
-          if ! command -v arping >/dev/null 2>&1; then
-            sudo -n apt-get update
-            sudo -n apt-get install -y python3-venv python3-pip python3-pytest
-          fi
 
           test -f "$SSH_KEY"
           chmod 600 "$SSH_KEY"
 
+          # якщо arping не встановлений, поставимо (потрібен для L2 діагностики)
+          if ! command -v arping >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y arping
+          fi
+
           echo "Waiting for SSH on $IP..."
           for i in {1..120}; do
             echo "---- try $i ----"
-            echo "[neigh]"
             ip neigh show | grep -E "$IP|FAILED|INCOMPLETE" || true
 
-            echo "[arping]"
-            arping -c 1 -I "$IFACE" "$IP" || true
+            # ARP probe (потрібен root/CAP_NET_RAW)
+            sudo arping -c 1 -I ens3 "$IP" || true
 
             if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                  -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK' ; then
+                  -o ConnectTimeout=5 -o IdentitiesOnly=yes \
+                  -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK' ; then
               echo "SSH is up"
               break
             fi
@@ -234,44 +226,35 @@ pipeline {
 
           # hard fail if still not reachable
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
+              -o ConnectTimeout=5 -o IdentitiesOnly=yes \
+              -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
 
           tar -czf repo.tgz .
+
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
+              -o IdentitiesOnly=yes -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
 
           ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -i "$SSH_KEY" "$SSH_USER@$IP" '
-                set -euxo pipefail
-                sudo apt-get update
-                sudo apt-get install -y python3-venv python3-pip
+              -o IdentitiesOnly=yes -i "$SSH_KEY" "$SSH_USER@$IP" '
+              set -euxo pipefail
+              sudo apt-get update
+              sudo apt-get install -y python3-venv python3-pip
 
-                mkdir -p ~/work && cd ~/work
-                tar -xzf /tmp/repo.tgz
+              mkdir -p ~/work && cd ~/work
+              tar -xzf /tmp/repo.tgz
 
-                python3 -m venv .venv
-                . .venv/bin/activate
-                pip install -U pip
-                pip install -r requirements.txt
+              python3 -m venv .venv
+              . .venv/bin/activate
+              pip install -U pip
+              pip install -r requirements.txt
 
-                mkdir -p reports
-                pytest -q --junitxml=reports/junit.xml
-              '
+              mkdir -p reports
+              pytest -q --junitxml=reports/junit.xml
+            '
 
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
+              -o IdentitiesOnly=yes -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
         '''
-      }
-    }
-
-    stage('DEBUG HOLD (pause before cleanup)') {
-      when { expression { return params.DEBUG_HOLD } }
-      steps {
-        script {
-          def vm = sh(script: "cat vm_name.txt 2>/dev/null || true", returnStdout: true).trim()
-          def ip = sh(script: "cat vm_ip.txt 2>/dev/null || true", returnStdout: true).trim()
-          input message: "DEBUG_HOLD enabled. VM is still alive.\nVM=${vm}\nIP=${ip}\nPress Continue to allow cleanup."
-        }
       }
     }
   }
@@ -294,25 +277,24 @@ pipeline {
 
       script {
         if (params.DEBUG_HOLD) {
-          echo "DEBUG_HOLD=true -> skipping VM delete in post. Delete manually when done."
-          return
+          input message: "DEBUG_HOLD=true. VM лишається живою. Натисни Continue щоб зробити cleanup."
         }
       }
 
-      // withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
-      //   sh '''#!/usr/bin/env bash
-      //     set +e
-      //     cp "$OPENRC" openrc.sh 2>/dev/null
-      //     chmod 600 openrc.sh 2>/dev/null
-      //     source ./openrc.sh 2>/dev/null
+      withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
+        sh '''#!/usr/bin/env bash
+          set +e
+          cp "$OPENRC" openrc.sh 2>/dev/null
+          chmod 600 openrc.sh 2>/dev/null
+          source ./openrc.sh 2>/dev/null
 
-      //     if [[ -f vm_name.txt ]]; then
-      //       VM_NAME=$(cat vm_name.txt)
-      //       echo "Deleting $VM_NAME"
-      //       openstack server delete "$VM_NAME" || true
-      //     fi
-      //   '''
-      // }
+          if [[ -f vm_name.txt ]]; then
+            VM_NAME=$(cat vm_name.txt)
+            echo "Deleting $VM_NAME"
+            openstack server delete "$VM_NAME" || true
+          fi
+        '''
+      }
     }
   }
 }
