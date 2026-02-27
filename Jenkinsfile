@@ -77,7 +77,6 @@ pipeline {
             echo "Waiting for IP..."
 
             for i in {1..60}; do
-              # robust-ish: works when "addresses" is dict; fallback when it's string
               RAW=$(openstack server show "$VM_NAME" -f json -c addresses)
               IP=$(echo "$RAW" | jq -r --arg net "$NETWORK" '
                 (.addresses[$net][0] // .addresses) | tostring
@@ -110,9 +109,19 @@ pipeline {
     stage('Run pytest on ephemeral VM') {
       steps {
         sh '''#!/usr/bin/env bash
-          set -euo pipefail
+          set -euxo pipefail
 
           IP=$(cat vm_ip.txt)
+          echo "Target IP: $IP"
+
+          echo "=== Local debug (Jenkins VM) ==="
+          whoami
+          pwd
+          ls -la
+          ip a || true
+          ip route || true
+          ping -c 2 "$IP" || true
+
           test -f "$SSH_KEY"
           chmod 600 "$SSH_KEY"
 
@@ -124,6 +133,10 @@ pipeline {
             fi
             sleep 5
           done
+
+          # Hard fail if SSH is still not reachable
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o ConnectTimeout=5 -i "$SSH_KEY" "$SSH_USER@$IP" 'echo SSH_OK_FINAL'
 
           # ship repo to VM
           tar -czf repo.tgz .
@@ -160,7 +173,18 @@ pipeline {
 
   post {
     always {
-      junit 'reports/junit.xml'
+      sh '''#!/usr/bin/env bash
+        set +e
+        echo "=== Post debug (workspace) ==="
+        pwd
+        ls -la
+        echo "--- reports dir ---"
+        ls -la reports 2>/dev/null || true
+        echo "--- find junit.xml ---"
+        find . -maxdepth 4 -type f -name "junit.xml" -print 2>/dev/null || true
+      '''
+
+      junit testResults: 'reports/junit.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
       withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
