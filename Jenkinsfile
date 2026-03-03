@@ -307,9 +307,9 @@ pipeline {
 
             failedDetails << """**${className} :: ${testName}**
 
-      \`\`\`
+      ```
       ${shortened}
-      \`\`\`
+      ```
       """
           }
 
