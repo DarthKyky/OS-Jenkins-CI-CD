@@ -234,9 +234,9 @@ pipeline {
               . .venv/bin/activate
               pip install -U pip
               pip install -r requirements.txt
-
               mkdir -p reports
-              pytest -q --junitxml=reports/junit.xml
+              export PYTHONPATH="$PWD"
+              pytest -q --rootdir=. --junitxml=reports/junit.xml
             '
 
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
