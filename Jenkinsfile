@@ -7,12 +7,11 @@ pipeline {
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.medium'
+    FLAVOR  = 'dev.large'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
     SSH_USER = 'ubuntu'
-    // ВАЖЛИВО: ключ має бути доступний саме юзеру jenkins
     SSH_KEY  = '/var/lib/jenkins/.ssh/devteam'
 
 
@@ -237,14 +236,14 @@ pipeline {
               mkdir -p reports
               export PYTHONPATH="$PWD"
 
-set +e
-pytest -q --rootdir=. --junitxml=reports/junit.xml
-PYTEST_RC=$?
-echo "$PYTEST_RC" > reports/pytest_rc.txt
-set -e
+              set +e
+              pytest -q --rootdir=. --junitxml=reports/junit.xml
+              PYTEST_RC=$?
+              echo "$PYTEST_RC" > reports/pytest_rc.txt
+              set -e
 
-# do not fail the SSH session due to test failures; Jenkins will mark UNSTABLE based on pytest_rc.txt
-exit 0
+              # do not fail the SSH session due to test failures; Jenkins will mark UNSTABLE based on pytest_rc.txt
+              exit 0
             '
 
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
@@ -281,6 +280,67 @@ exit 0
 
       junit testResults: 'reports/junit.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+
+      script {
+        if (fileExists('reports/junit.xml')) {
+          def xml = readFile('reports/junit.xml')
+
+          def tests = (xml =~ /tests="(\d+)"/)[0][1]
+          def failures = (xml =~ /failures="(\d+)"/)[0][1]
+
+          def failedDetails = []
+
+          def matcher = (xml =~ /<testcase classname="([^"]+)" name="([^"]+)">[\s\S]*?<failure[^>]*>([\s\S]*?)<\/failure>/)
+
+          matcher.each { m ->
+            def className = m[1]
+            def testName  = m[2]
+            def failureText = m[3]
+              .replaceAll("&lt;", "<")
+              .replaceAll("&gt;", ">")
+              .replaceAll("&amp;", "&")
+
+            def shortened = failureText
+              .split("\n")
+              .take(20)
+              .join("\n")
+
+            failedDetails << """**${className} :: ${testName}**
+
+      \`\`\`
+      ${shortened}
+      \`\`\`
+      """
+          }
+
+          def summary = "## CI Test Report\n\n"
+          summary += "- Total tests: **${tests}**\n"
+          summary += "- Failures: **${failures}**\n\n"
+
+          if (failedDetails) {
+            summary += "### Failed Tests\n"
+            failedDetails.each { summary += it + "\n" }
+          } else {
+            summary += "### All tests passed\n"
+          }
+
+          summary += "\n [View full Jenkins build](${env.BUILD_URL})"
+
+          withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
+            sh """
+              curl -s -X POST \
+                -H "Authorization: token \$GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                https://api.github.com/repos/DarthKyky/OS-Jenkins-CI-CD/commits/${env.GIT_COMMIT}/comments \
+                -d @- <<EOF
+              {
+                "body": ${groovy.json.JsonOutput.toJson(summary)}
+              }
+      EOF
+            """
+          }
+        }
+      }
 
       script {
         if (params.DEBUG_HOLD) {

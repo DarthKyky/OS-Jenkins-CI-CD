@@ -44,6 +44,7 @@ def test_type_validation_raises_typeerror(a, b):
     with pytest.raises(TypeError):
         add(a, b)
 
+@pytest.mark.xfail(reason="Demonstration of failing test")
 def test_wrong_divide_result():
     assert divide (20, 5) == 5
     
