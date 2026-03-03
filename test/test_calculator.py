@@ -39,6 +39,7 @@ def test_float_precision_with_approx():
     (None, 1),
     ([], 1),
 ])
+
 def test_type_validation_raises_typeerror(a, b):
     with pytest.raises(TypeError):
         add(a, b)
@@ -46,3 +47,5 @@ def test_type_validation_raises_typeerror(a, b):
 def test_wrong_divide_result():
     assert divide (20, 5) == 5
     
+def test_divide():
+    assert divide(20, 0) == 4
