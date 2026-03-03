@@ -236,11 +236,32 @@ pipeline {
               pip install -r requirements.txt
               mkdir -p reports
               export PYTHONPATH="$PWD"
-              pytest -q --rootdir=. --junitxml=reports/junit.xml
+
+set +e
+pytest -q --rootdir=. --junitxml=reports/junit.xml
+PYTEST_RC=$?
+echo "$PYTEST_RC" > reports/pytest_rc.txt
+set -e
+
+# do not fail the SSH session due to test failures; Jenkins will mark UNSTABLE based on pytest_rc.txt
+exit 0
             '
 
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
+          scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/pytest_rc.txt" reports/pytest_rc.txt
         '''
+      script {
+  // Mark build UNSTABLE if pytest had failures (but keep pipeline running to publish reports/cleanup)
+  if (fileExists('reports/pytest_rc.txt')) {
+    def rc = readFile('reports/pytest_rc.txt').trim()
+    if (rc != '0') {
+      currentBuild.result = 'UNSTABLE'
+      echo "Pytest exit code=${rc} → marking build UNSTABLE"
+    }
+  } else {
+    echo "No reports/pytest_rc.txt found (pytest may not have run)"
+  }
+}
       }
     }
   }
