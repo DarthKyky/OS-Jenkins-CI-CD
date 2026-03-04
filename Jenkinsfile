@@ -281,78 +281,78 @@ pipeline {
       junit testResults: 'reports/junit.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
-      script {
-        if (!env.GIT_COMMIT) {
-          echo "GIT_COMMIT is not set. Skipping GitHub comment."
-          return
-        }
-        if (!fileExists('reports/junit.xml')) {
-          echo "reports/junit.xml not found. Skipping GitHub comment."
-          return
-        }
+      // script {
+      //   if (!env.GIT_COMMIT) {
+      //     echo "GIT_COMMIT is not set. Skipping GitHub comment."
+      //     return
+      //   }
+      //   if (!fileExists('reports/junit.xml')) {
+      //     echo "reports/junit.xml not found. Skipping GitHub comment."
+      //     return
+      //   }
 
-        def xmlText = readFile('reports/junit.xml')
-        def root = new XmlSlurper(false, false).parseText(xmlText)
+      //   def xmlText = readFile('reports/junit.xml')
+      //   def root = new XmlSlurper(false, false).parseText(xmlText)
 
-        int totalTests = 0
-        int totalFailures = 0
-        def failedDetails = []
+      //   int totalTests = 0
+      //   int totalFailures = 0
+      //   def failedDetails = []
 
-        // Уникаємо root.testsuite / root.testcase — використовуємо ['testsuite']
-        def suites = (root.name() == 'testsuite') ? [root] : root['testsuite']
+      //   // Уникаємо root.testsuite / root.testcase — використовуємо ['testsuite']
+      //   def suites = (root.name() == 'testsuite') ? [root] : root['testsuite']
 
-        suites.each { ts ->
-          // attributes() замість ts.@tests / ts.@failures
-          def tsAttrs = ts.attributes()
-          totalTests += ((tsAttrs['tests'] ?: "0") as String).isInteger() ? (tsAttrs['tests'] as int) : 0
-          totalFailures += ((tsAttrs['failures'] ?: "0") as String).isInteger() ? (tsAttrs['failures'] as int) : 0
+      //   suites.each { ts ->
+      //     // attributes() замість ts.@tests / ts.@failures
+      //     def tsAttrs = ts.attributes()
+      //     totalTests += ((tsAttrs['tests'] ?: "0") as String).isInteger() ? (tsAttrs['tests'] as int) : 0
+      //     totalFailures += ((tsAttrs['failures'] ?: "0") as String).isInteger() ? (tsAttrs['failures'] as int) : 0
 
-          // Уникаємо ts.testcase — використовуємо ['testcase']
-          ts['testcase'].each { tc ->
-            // Уникаємо tc.failure — використовуємо ['failure']
-            def failures = tc['failure']
-            if (failures != null && failures.size() > 0) {
-              def tcAttrs = tc.attributes()
-              def className = (tcAttrs['classname'] ?: "").toString()
-              def testName  = (tcAttrs['name'] ?: "").toString()
+      //     // Уникаємо ts.testcase — використовуємо ['testcase']
+      //     ts['testcase'].each { tc ->
+      //       // Уникаємо tc.failure — використовуємо ['failure']
+      //       def failures = tc['failure']
+      //       if (failures != null && failures.size() > 0) {
+      //         def tcAttrs = tc.attributes()
+      //         def className = (tcAttrs['classname'] ?: "").toString()
+      //         def testName  = (tcAttrs['name'] ?: "").toString()
 
-              def failureText = failures[0].text()
-              def shortened = failureText.readLines().take(20).join("\n")
+      //         def failureText = failures[0].text()
+      //         def shortened = failureText.readLines().take(20).join("\n")
 
-              // Без """...""" і без ``` щоб не ламалося при копіпасті
-              def block = "**" + className + " :: " + testName + "**\n\n"
-              block += "----\n" + shortened + "\n----\n"
-              failedDetails << block
-            }
-          }
-        }
+      //         // Без """...""" і без ``` щоб не ламалося при копіпасті
+      //         def block = "**" + className + " :: " + testName + "**\n\n"
+      //         block += "----\n" + shortened + "\n----\n"
+      //         failedDetails << block
+      //       }
+      //     }
+      //   }
 
-        def statusEmoji = (currentBuild.currentResult == 'UNSTABLE') ? "🟡" : "🟢"
-        def summary = "## " + statusEmoji + " CI Test Report\n\n"
-        summary += "- Total tests: **" + totalTests + "**\n"
-        summary += "- Failures: **" + totalFailures + "**\n"
-        summary += "- Jenkins result: **" + currentBuild.currentResult + "**\n\n"
+      //   def statusEmoji = (currentBuild.currentResult == 'UNSTABLE') ? "🟡" : "🟢"
+      //   def summary = "## " + statusEmoji + " CI Test Report\n\n"
+      //   summary += "- Total tests: **" + totalTests + "**\n"
+      //   summary += "- Failures: **" + totalFailures + "**\n"
+      //   summary += "- Jenkins result: **" + currentBuild.currentResult + "**\n\n"
 
-        if (failedDetails && failedDetails.size() > 0) {
-          summary += "### ❌ Failed Tests\n"
-          failedDetails.each { summary += it + "\n" }
-        } else {
-          summary += "### ✅ All tests passed\n"
-        }
+      //   if (failedDetails && failedDetails.size() > 0) {
+      //     summary += "### Failed Tests\n"
+      //     failedDetails.each { summary += it + "\n" }
+      //   } else {
+      //     summary += "###All tests passed\n"
+      //   }
 
-        summary += "\n🔗 View full Jenkins build: " + env.BUILD_URL + "\n"
+      //   summary += "\n View full Jenkins build: " + env.BUILD_URL + "\n"
 
-        withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
-          def payload = groovy.json.JsonOutput.toJson([body: summary])
-          sh """
-            curl -s -X POST \
-              -H "Authorization: token \$GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/DarthKyky/OS-Jenkins-CI-CD/commits/${env.GIT_COMMIT}/comments \
-              -d '${payload}'
-          """
-        }
-      }
+      //   withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
+      //     def payload = groovy.json.JsonOutput.toJson([body: summary])
+      //     sh """
+      //       curl -s -X POST \
+      //         -H "Authorization: token \$GITHUB_TOKEN" \
+      //         -H "Accept: application/vnd.github+json" \
+      //         https://api.github.com/repos/DarthKyky/OS-Jenkins-CI-CD/commits/${env.GIT_COMMIT}/comments \
+      //         -d '${payload}'
+      //     """
+      //   }
+      // }
 
       script {
         if (params.DEBUG_HOLD) {
