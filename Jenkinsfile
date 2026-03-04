@@ -282,63 +282,80 @@ pipeline {
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
       script {
-        if (fileExists('reports/junit.xml')) {
-          def xml = readFile('reports/junit.xml')
-
-          def tests = (xml =~ /tests="(\d+)"/)[0][1]
-          def failures = (xml =~ /failures="(\d+)"/)[0][1]
-
-          def failedDetails = []
-
-          def matcher = (xml =~ /<testcase classname="([^"]+)" name="([^"]+)">[\s\S]*?<failure[^>]*>([\s\S]*?)<\/failure>/)
-
-          matcher.each { m ->
-            def className = m[1]
-            def testName  = m[2]
-            def failureText = m[3]
-              .replaceAll("&lt;", "<")
-              .replaceAll("&gt;", ">")
-              .replaceAll("&amp;", "&")
-
-            def shortened = failureText
-              .split("\n")
-              .take(20)
-              .join("\n")
-
-            failedDetails << """**${className} :: ${testName}**
-
-      ```
-      ${shortened}
-      ```
-      """
+        // 1) Mark build UNSTABLE if pytest non-zero
+        if (fileExists('reports/pytest_rc.txt')) {
+          def rc = readFile('reports/pytest_rc.txt').trim()
+          if (rc && rc != '0') {
+            currentBuild.result = 'UNSTABLE'
+            echo "Marked build UNSTABLE (pytest exit code = ${rc})"
           }
+        }
 
-          def summary = "## CI Test Report\n\n"
-          summary += "- Total tests: **${tests}**\n"
-          summary += "- Failures: **${failures}**\n\n"
+        // 2) Prepare and post GitHub comment (from junit.xml)
+        if (!env.GIT_COMMIT) {
+          echo "GIT_COMMIT is not set. Skipping GitHub comment."
+          return
+        }
+        if (!fileExists('reports/junit.xml')) {
+          echo "reports/junit.xml not found. Skipping GitHub comment."
+          return
+        }
 
-          if (failedDetails) {
-            summary += "### Failed Tests\n"
-            failedDetails.each { summary += it + "\n" }
-          } else {
-            summary += "### All tests passed\n"
+        def xmlText = readFile('reports/junit.xml')
+        def root = new XmlSlurper(false, false).parseText(xmlText)
+
+        int totalTests = 0
+        int totalFailures = 0
+        def failedDetails = []
+
+        def suites = (root.name() == 'testsuite') ? [root] : root.testsuite
+
+        suites.each { ts ->
+          totalTests += (ts.@tests?.text() ?: "0") as int
+          totalFailures += (ts.@failures?.text() ?: "0") as int
+
+          ts.testcase.each { tc ->
+            if (tc.failure.size() > 0) {
+              def className = tc.@classname.text()
+              def testName  = tc.@name.text()
+
+              def failureText = tc.failure[0].text()
+              def shortened = failureText.readLines().take(20).join("\n")
+
+              // Avoid triple-quotes / markdown fences to prevent copy/paste breakage
+              def block = "**" + className + " :: " + testName + "**\n\n"
+              block += "----\n"
+              block += shortened + "\n"
+              block += "----\n"
+              failedDetails << block
+            }
           }
+        }
 
-          summary += "\n [View full Jenkins build](${env.BUILD_URL})"
+        def statusEmoji = (currentBuild.currentResult == 'UNSTABLE') ? "🟡" : "🟢"
+        def summary = "## " + statusEmoji + " CI Test Report\n\n"
+        summary += "- Total tests: **" + totalTests + "**\n"
+        summary += "- Failures: **" + totalFailures + "**\n"
+        summary += "- Jenkins result: **" + currentBuild.currentResult + "**\n\n"
 
-          withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
-            sh """
-              curl -s -X POST \
-                -H "Authorization: token \$GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                https://api.github.com/repos/DarthKyky/OS-Jenkins-CI-CD/commits/${env.GIT_COMMIT}/comments \
-                -d @- <<EOF
-              {
-                "body": ${groovy.json.JsonOutput.toJson(summary)}
-              }
-      EOF
-            """
-          }
+        if (failedDetails && failedDetails.size() > 0) {
+          summary += "###Failed Tests\n"
+          failedDetails.each { summary += it + "\n" }
+        } else {
+          summary += "###All tests passed\n"
+        }
+
+        summary += "\n View full Jenkins build: " + env.BUILD_URL + "\n"
+
+        withCredentials([string(credentialsId: 'github-pat', variable: 'GITHUB_TOKEN')]) {
+          def payload = groovy.json.JsonOutput.toJson([body: summary])
+          sh """
+            curl -s -X POST \
+              -H "Authorization: token \$GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/DarthKyky/OS-Jenkins-CI-CD/commits/${env.GIT_COMMIT}/comments \
+              -d '${payload}'
+          """
         }
       }
 
