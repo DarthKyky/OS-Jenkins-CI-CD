@@ -169,6 +169,8 @@ pipeline {
         expression { return params.DEBUG_VERBOSE }
       }
       steps {
+        echo "DEBUG_VERBOSE enabled -> running OpenStack diagnostics"
+
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
             set -euxo pipefail
@@ -180,7 +182,10 @@ pipeline {
             VM_NAME=$(cat vm_name.txt)
             IP=$(cat vm_ip.txt)
 
+            echo "=== Server info ==="
             openstack server show "$VM_NAME" -c status -c addresses -c OS-EXT-SRV-ATTR:host -c fault -f yaml || true
+
+            echo "=== Ports ==="
             openstack port list --server "$VM_NAME" -f table || true
 
             PORT_ID=$(openstack port list --server "$VM_NAME" -f value -c ID | head -n1 || true)
@@ -188,7 +193,10 @@ pipeline {
               openstack port show "$PORT_ID" -f yaml || true
             fi
 
+            echo "=== Console log ==="
             openstack console log show "$VM_NAME" | tail -n 120 || true
+
+            echo "=== Ping ==="
             ping -c 2 "$IP" || true
           '''
         }
@@ -269,28 +277,44 @@ pipeline {
 
             mkdir -p ~/work && cd ~/work
             tar -xzf /tmp/repo.tgz
+            mkdir -p reports
 
             {
               echo "=== system info ==="
               date
               uname -a
+              echo
+
+              echo "=== OS release ==="
+              cat /etc/os-release || true
+              echo
+
+              echo "=== memory ==="
+              free -h || true
+              echo
+
+              echo "=== disk ==="
+              df -h || true
+              echo
+
+              echo "=== python ==="
               python3 --version || true
               pip3 --version || true
-            } | tee reports_bootstrap.log
+            } | tee reports/system-info.txt
+
+            cp reports/system-info.txt reports/bootstrap.log
 
             python3 -m venv .venv
             . .venv/bin/activate
             pip install -U pip
             pip install -r requirements.txt
 
-            mkdir -p reports
             export PYTHONPATH="$PWD"
 
             set +e
             pytest -q --rootdir=. --junitxml=reports/junit.xml 2>&1 | tee reports/pytest.log
             PYTEST_RC=$?
             echo "$PYTEST_RC" > reports/pytest_rc.txt
-            cp reports_bootstrap.log reports/bootstrap.log
             set -e
 
             exit 0
@@ -300,6 +324,7 @@ pipeline {
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/pytest_rc.txt" reports/pytest_rc.txt
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/pytest.log" reports/pytest.log || true
           scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/bootstrap.log" reports/bootstrap.log || true
+          scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/system-info.txt" reports/system-info.txt || true
         '''
 
         script {
