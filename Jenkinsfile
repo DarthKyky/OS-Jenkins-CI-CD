@@ -7,7 +7,7 @@ pipeline {
   }
 
   parameters {
-    booleanParam(name: 'DEBUG_VERBOSE', defaultValue: false, description: 'Run extra OpenStack/console diagnostics')
+    booleanParam(name: 'DEBUG_VERBOSE', defaultValue: false, description: 'Run extra OpenStack diagnostics')
     booleanParam(name: 'DEBUG_HOLD', defaultValue: false, description: 'Pause before cleanup to debug networking')
   }
 
@@ -29,24 +29,20 @@ pipeline {
     stage('Init') {
       steps {
         sh '''#!/usr/bin/env bash
-          set -euxo pipefail
-          rm -f vm_name.txt vm_ip.txt openrc.sh repo.tgz || true
+          set -euo pipefail
+          rm -f vm_name.txt vm_ip.txt repo.tgz || true
           rm -rf reports || true
           mkdir -p reports
         '''
       }
     }
 
-    // Нема окремого stage('Checkout'), бо declarative checkout уже відпрацював вище
-
     stage('Ensure CI Security Group') {
       steps {
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
             set -euo pipefail
-            cp "$OPENRC" openrc.sh
-            chmod 600 openrc.sh
-            source ./openrc.sh
+            source "$OPENRC"
 
             if ! openstack security group show "$CI_SG_NAME" >/dev/null 2>&1; then
               openstack security group create "$CI_SG_NAME" --description "CI: allow SSH+ICMP from ${CI_CIDR}"
@@ -73,7 +69,7 @@ pipeline {
             }
 
             ensure_rule icmp "$CI_CIDR"
-            ensure_rule tcp  "$CI_CIDR" "22:22"
+            ensure_rule tcp "$CI_CIDR" "22:22"
 
             echo "=== SG $CI_SG_NAME rules ==="
             openstack security group rule list "$CI_SG_NAME"
@@ -86,11 +82,8 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
-            set -euxo pipefail
-
-            cp "$OPENRC" openrc.sh
-            chmod 600 openrc.sh
-            source ./openrc.sh
+            set -euo pipefail
+            source "$OPENRC"
 
             VM_NAME="ci-ephemeral-${BUILD_NUMBER}"
             echo "$VM_NAME" > vm_name.txt
@@ -130,11 +123,8 @@ pipeline {
       steps {
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
-            set -euxo pipefail
-
-            cp "$OPENRC" openrc.sh
-            chmod 600 openrc.sh
-            source ./openrc.sh
+            set -euo pipefail
+            source "$OPENRC"
 
             VM_NAME=$(cat vm_name.txt)
 
@@ -169,15 +159,11 @@ pipeline {
         expression { return params.DEBUG_VERBOSE }
       }
       steps {
-        echo "DEBUG_VERBOSE enabled -> running OpenStack diagnostics"
-
+        echo 'DEBUG_VERBOSE enabled -> running OpenStack diagnostics'
         withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
           sh '''#!/usr/bin/env bash
-            set -euxo pipefail
-
-            cp "$OPENRC" openrc.sh
-            chmod 600 openrc.sh
-            source ./openrc.sh
+            set -euo pipefail
+            source "$OPENRC"
 
             VM_NAME=$(cat vm_name.txt)
             IP=$(cat vm_ip.txt)
@@ -206,7 +192,7 @@ pipeline {
     stage('Wait for SSH') {
       steps {
         sh '''#!/usr/bin/env bash
-          set -euxo pipefail
+          set -euo pipefail
 
           IP=$(cat vm_ip.txt)
           test -f "$SSH_KEY"
@@ -234,15 +220,14 @@ pipeline {
     stage('Wait for cloud-init') {
       steps {
         sh '''#!/usr/bin/env bash
-          set -euxo pipefail
+          set -euo pipefail
 
           IP=$(cat vm_ip.txt)
           chmod 600 "$SSH_KEY"
 
           echo "Waiting for cloud-init boot-finished..."
           for i in {1..120}; do
-            if ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" \
-              'test -f /var/lib/cloud/instance/boot-finished'; then
+            if ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" 'test -f /var/lib/cloud/instance/boot-finished'; then
               echo "cloud-init finished"
               exit 0
             fi
@@ -261,7 +246,7 @@ pipeline {
     stage('Run pytest on ephemeral VM') {
       steps {
         sh '''#!/usr/bin/env bash
-          set -euxo pipefail
+          set -euo pipefail
 
           IP=$(cat vm_ip.txt)
           chmod 600 "$SSH_KEY"
@@ -270,7 +255,7 @@ pipeline {
           scp $SSH_OPTS -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
 
           ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" '
-            set -euxo pipefail
+            set -euo pipefail
 
             sudo apt-get update
             sudo apt-get install -y python3-venv python3-pip
@@ -335,7 +320,7 @@ pipeline {
               echo "Pytest exit code=${rc} -> marking build UNSTABLE"
             }
           } else {
-            echo "No reports/pytest_rc.txt found"
+            echo 'No reports/pytest_rc.txt found'
           }
         }
       }
@@ -346,9 +331,8 @@ pipeline {
     always {
       sh '''#!/usr/bin/env bash
         set +e
-        echo "=== Post debug (workspace) ==="
+        echo "=== Post summary ==="
         pwd
-        ls -la
         echo "--- reports dir ---"
         ls -la reports 2>/dev/null || true
         echo "--- junit.xml files ---"
@@ -360,17 +344,14 @@ pipeline {
 
       script {
         if (params.DEBUG_HOLD) {
-          echo 'DEBUG_HOLD=true -> sleeping 10 minutes before cleanup'
-          sleep(time: 10, unit: 'MINUTES')
+          input message: 'DEBUG_HOLD=true. VM stays alive. Click Continue to run cleanup.'
         }
       }
 
       withCredentials([file(credentialsId: 'openstack-openrc', variable: 'OPENRC')]) {
         sh '''#!/usr/bin/env bash
           set +e
-          cp "$OPENRC" openrc.sh
-          chmod 600 openrc.sh
-          source ./openrc.sh
+          source "$OPENRC"
 
           if [[ -f vm_name.txt ]]; then
             VM_NAME=$(cat vm_name.txt)
