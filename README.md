@@ -6,4 +6,4 @@ The project contains:
 - Simple calculator functions
 - 4 unit tests using pytest
 
-test commit v2
+test commit
