@@ -188,7 +188,7 @@ def waitForCloudInit(script) {
   '''
 }
 
-def runPythonTests(script) {
+def uploadRepository(script) {
   script.sh '''#!/usr/bin/env bash
     set -euo pipefail
 
@@ -197,6 +197,15 @@ def runPythonTests(script) {
 
     git archive --format=tar.gz -o repo.tgz HEAD
     scp $SSH_OPTS -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
+  '''
+}
+
+def runPythonTests(script) {
+  script.sh '''#!/usr/bin/env bash
+    set -euo pipefail
+
+    IP=$(cat vm_ip.txt)
+    chmod 600 "$SSH_KEY"
 
     ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" '
       set -euo pipefail
@@ -205,8 +214,10 @@ def runPythonTests(script) {
       sudo apt-get install -y python3-venv python3-pip
 
       mkdir -p ~/work && cd ~/work
-      tar -xzf /tmp/repo.tgz
-      cd Projects/Python
+      rm -rf repo
+      mkdir -p repo
+      tar -xzf /tmp/repo.tgz -C repo
+      cd repo/Projects/Python
       mkdir -p reports
 
       {
@@ -259,9 +270,6 @@ def runJavaTests(script) {
     IP=$(cat vm_ip.txt)
     chmod 600 "$SSH_KEY"
 
-    git archive --format=tar.gz -o repo.tgz HEAD
-    scp $SSH_OPTS -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
-
     ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" '
       set -euo pipefail
 
@@ -269,8 +277,10 @@ def runJavaTests(script) {
       sudo apt-get install -y openjdk-21-jdk maven
 
       mkdir -p ~/work && cd ~/work
-      tar -xzf /tmp/repo.tgz
-      cd projects/java
+      rm -rf repo
+      mkdir -p repo
+      tar -xzf /tmp/repo.tgz -C repo
+      cd repo/Projects/Java
       mkdir -p reports
 
       {
@@ -323,9 +333,9 @@ def collectPythonArtifacts(script) {
 
     IP=$(cat vm_ip.txt)
     chmod 600 "$SSH_KEY"
-    mkdir -p reports
+    mkdir -p reports/python
 
-    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/projects/python/reports/." reports/ || true
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/python/reports/." reports/python/ || true
   '''
 }
 
@@ -335,9 +345,9 @@ def collectJavaArtifacts(script) {
 
     IP=$(cat vm_ip.txt)
     chmod 600 "$SSH_KEY"
-    mkdir -p reports
+    mkdir -p reports/java
 
-    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/projects/java/reports/." reports/ || true
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/java/reports/." reports/java/ || true
   '''
 }
 
@@ -356,6 +366,32 @@ def cleanupVm(script) {
   }
 }
 
+def hasPythonChanges() {
+  for (changeLogSet in currentBuild.changeSets) {
+    for (entry in changeLogSet.items) {
+      for (file in entry.affectedFiles) {
+        if (file.path.startsWith('Projects/Python/')) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+def hasJavaChanges() {
+  for (changeLogSet in currentBuild.changeSets) {
+    for (entry in changeLogSet.items) {
+      for (file in entry.affectedFiles) {
+        if (file.path.startsWith('Projects/Java/')) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
 pipeline {
   agent any
 
@@ -365,14 +401,13 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'PROJECT_TYPE', choices: ['python', 'java'], description: 'Workload type for the ephemeral runner')
     booleanParam(name: 'DEBUG_VERBOSE', defaultValue: false, description: 'Run extra OpenStack diagnostics')
     booleanParam(name: 'DEBUG_HOLD', defaultValue: false, description: 'Pause before cleanup to debug networking')
   }
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.large'
+    FLAVOR  = 'dev.small'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
@@ -382,6 +417,10 @@ pipeline {
 
     CI_SG_NAME = 'ci-ssh'
     CI_CIDR    = '10.20.0.0/24'
+
+    RUN_PYTHON = 'false'
+    RUN_JAVA   = 'false'
+    RUN_ANY    = 'false'
   }
 
   stages {
@@ -393,22 +432,45 @@ pipeline {
           rm -rf reports || true
           mkdir -p reports
         '''
+
+        script {
+          env.RUN_PYTHON = hasPythonChanges() ? 'true' : 'false'
+          env.RUN_JAVA   = hasJavaChanges() ? 'true' : 'false'
+          env.RUN_ANY    = (env.RUN_PYTHON == 'true' || env.RUN_JAVA == 'true') ? 'true' : 'false'
+
+          echo "RUN_PYTHON=${env.RUN_PYTHON}"
+          echo "RUN_JAVA=${env.RUN_JAVA}"
+          echo "RUN_ANY=${env.RUN_ANY}"
+
+          if (env.RUN_ANY != 'true') {
+            echo 'No changes detected in Projects/Python or Projects/Java -> skipping ephemeral runner'
+          }
+        }
       }
     }
 
     stage('Ensure CI Security Group') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
         script { ensureCiSecurityGroup(this) }
       }
     }
 
     stage('Create ephemeral VM') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
         script { createVm(this) }
       }
     }
 
     stage('Wait for IP on devnet') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
         script { waitForIp(this) }
       }
@@ -416,7 +478,7 @@ pipeline {
 
     stage('Debug OpenStack diagnostics') {
       when {
-        expression { return params.DEBUG_VERBOSE }
+        expression { env.RUN_ANY == 'true' && params.DEBUG_VERBOSE }
       }
       steps {
         echo 'DEBUG_VERBOSE enabled -> running OpenStack diagnostics'
@@ -425,60 +487,79 @@ pipeline {
     }
 
     stage('Wait for SSH') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
         script { waitForSsh(this) }
       }
     }
 
     stage('Wait for cloud-init') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
         script { waitForCloudInit(this) }
       }
     }
 
-    stage('Run tests on ephemeral VM') {
+    stage('Upload repository to VM') {
+      when {
+        expression { env.RUN_ANY == 'true' }
+      }
       steps {
-        script {
-          switch (params.PROJECT_TYPE) {
-            case 'python':
-              runPythonTests(this)
-              break
-            case 'java':
-              runJavaTests(this)
-              break
-            default:
-              error("Unsupported PROJECT_TYPE: ${params.PROJECT_TYPE}")
-          }
-        }
+        script { uploadRepository(this) }
       }
     }
 
-    stage('Collect artifacts') {
+    stage('Run Python tests') {
+      when {
+        expression { env.RUN_PYTHON == 'true' }
+      }
       steps {
-        script {
-          switch (params.PROJECT_TYPE) {
-            case 'python':
-              collectPythonArtifacts(this)
-              break
-            case 'java':
-              collectJavaArtifacts(this)
-              break
-            default:
-              error("Unsupported PROJECT_TYPE: ${params.PROJECT_TYPE}")
-          }
-        }
+        script { runPythonTests(this) }
+      }
+    }
+
+    stage('Run Java tests') {
+      when {
+        expression { env.RUN_JAVA == 'true' }
+      }
+      steps {
+        script { runJavaTests(this) }
+      }
+    }
+
+    stage('Collect Python artifacts') {
+      when {
+        expression { env.RUN_PYTHON == 'true' }
+      }
+      steps {
+        script { collectPythonArtifacts(this) }
 
         script {
-          if (fileExists('reports/pytest_rc.txt')) {
-            def rc = readFile('reports/pytest_rc.txt').trim()
+          if (fileExists('reports/python/pytest_rc.txt')) {
+            def rc = readFile('reports/python/pytest_rc.txt').trim()
             if (rc != '0') {
               currentBuild.result = 'UNSTABLE'
               echo "Pytest exit code=${rc} -> marking build UNSTABLE"
             }
           }
+        }
+      }
+    }
 
-          if (fileExists('reports/maven_rc.txt')) {
-            def rc = readFile('reports/maven_rc.txt').trim()
+    stage('Collect Java artifacts') {
+      when {
+        expression { env.RUN_JAVA == 'true' }
+      }
+      steps {
+        script { collectJavaArtifacts(this) }
+
+        script {
+          if (fileExists('reports/java/maven_rc.txt')) {
+            def rc = readFile('reports/java/maven_rc.txt').trim()
             if (rc != '0') {
               currentBuild.result = 'UNSTABLE'
               echo "Maven exit code=${rc} -> marking build UNSTABLE"
@@ -497,20 +578,28 @@ pipeline {
         pwd
         echo "--- reports dir ---"
         ls -la reports 2>/dev/null || true
+        echo "--- report tree ---"
+        find reports -maxdepth 3 -type f -print 2>/dev/null || true
         echo "--- xml files ---"
-        find . -maxdepth 4 -type f -name "*.xml" -print 2>/dev/null || true
+        find reports -type f -name "*.xml" -print 2>/dev/null || true
       '''
 
       junit testResults: 'reports/**/*.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
       script {
-        if (params.DEBUG_HOLD) {
+        if (params.DEBUG_HOLD && env.RUN_ANY == 'true') {
           input message: 'DEBUG_HOLD=true. VM stays alive. Click Continue to run cleanup.'
         }
       }
 
-      script { cleanupVm(this) }
+      script {
+        if (env.RUN_ANY == 'true') {
+          cleanupVm(this)
+        } else {
+          echo 'No ephemeral VM was created; cleanup skipped.'
+        }
+      }
     }
   }
 }
