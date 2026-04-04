@@ -381,7 +381,7 @@ pipeline {
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.large'
+    FLAVOR  = 'dev.small'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
@@ -416,23 +416,26 @@ pipeline {
             echo "=== First detectable build, using full tree ==="
             git ls-tree -r --name-only HEAD | tee changed_files.txt
           fi
+
+          echo "=== Workspace tree (top 4 levels) ==="
+          find . -maxdepth 4 -type f | sort || true
+
+          echo "=== changed_files.txt raw ==="
+          cat changed_files.txt || true
         '''
 
         script {
           def changedFiles = fileExists('changed_files.txt') ? readFile('changed_files.txt') : ''
 
+          echo "Changed files from Groovy:\n${changedFiles}"
+
           env.RUN_PYTHON = changedFiles.readLines().any { it.startsWith('Projects/Python/') } ? 'true' : 'false'
           env.RUN_JAVA   = changedFiles.readLines().any { it.startsWith('Projects/Java/') } ? 'true' : 'false'
           env.RUN_ANY    = (env.RUN_PYTHON == 'true' || env.RUN_JAVA == 'true') ? 'true' : 'false'
 
-          echo "Changed files:\\n${changedFiles}"
           echo "RUN_PYTHON=${env.RUN_PYTHON}"
           echo "RUN_JAVA=${env.RUN_JAVA}"
           echo "RUN_ANY=${env.RUN_ANY}"
-
-          if (env.RUN_ANY != 'true') {
-            echo 'No changes detected in Projects/Python or Projects/Java -> skipping ephemeral runner'
-          }
         }
       }
     }
