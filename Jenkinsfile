@@ -335,7 +335,7 @@ def collectPythonArtifacts(script) {
     chmod 600 "$SSH_KEY"
     mkdir -p reports/python
 
-    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/python/reports/." reports/python/ || true
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/Python/reports/." reports/python/ || true
   '''
 }
 
@@ -347,7 +347,7 @@ def collectJavaArtifacts(script) {
     chmod 600 "$SSH_KEY"
     mkdir -p reports/java
 
-    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/java/reports/." reports/java/ || true
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/repo/Projects/Java/reports/." reports/java/ || true
   '''
 }
 
@@ -366,32 +366,6 @@ def cleanupVm(script) {
   }
 }
 
-def hasPythonChanges() {
-  for (changeLogSet in currentBuild.changeSets) {
-    for (entry in changeLogSet.items) {
-      for (file in entry.affectedFiles) {
-        if (file.path.startsWith('Projects/Python/')) {
-          return true
-        }
-      }
-    }
-  }
-  return false
-}
-
-def hasJavaChanges() {
-  for (changeLogSet in currentBuild.changeSets) {
-    for (entry in changeLogSet.items) {
-      for (file in entry.affectedFiles) {
-        if (file.path.startsWith('Projects/Java/')) {
-          return true
-        }
-      }
-    }
-  }
-  return false
-}
-
 pipeline {
   agent any
 
@@ -407,7 +381,7 @@ pipeline {
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.small'
+    FLAVOR  = 'dev.large'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
@@ -428,16 +402,30 @@ pipeline {
       steps {
         sh '''#!/usr/bin/env bash
           set -euo pipefail
-          rm -f vm_name.txt vm_ip.txt repo.tgz || true
+          rm -f vm_name.txt vm_ip.txt repo.tgz changed_files.txt || true
           rm -rf reports || true
           mkdir -p reports
+
+          echo "=== Git info ==="
+          git rev-parse HEAD
+
+          if git rev-parse HEAD^ >/dev/null 2>&1; then
+            echo "=== Changed files (HEAD^..HEAD) ==="
+            git diff --name-only HEAD^ HEAD | tee changed_files.txt
+          else
+            echo "=== First detectable build, using full tree ==="
+            git ls-tree -r --name-only HEAD | tee changed_files.txt
+          fi
         '''
 
         script {
-          env.RUN_PYTHON = hasPythonChanges() ? 'true' : 'false'
-          env.RUN_JAVA   = hasJavaChanges() ? 'true' : 'false'
+          def changedFiles = fileExists('changed_files.txt') ? readFile('changed_files.txt') : ''
+
+          env.RUN_PYTHON = changedFiles.readLines().any { it.startsWith('Projects/Python/') } ? 'true' : 'false'
+          env.RUN_JAVA   = changedFiles.readLines().any { it.startsWith('Projects/Java/') } ? 'true' : 'false'
           env.RUN_ANY    = (env.RUN_PYTHON == 'true' || env.RUN_JAVA == 'true') ? 'true' : 'false'
 
+          echo "Changed files:\\n${changedFiles}"
           echo "RUN_PYTHON=${env.RUN_PYTHON}"
           echo "RUN_JAVA=${env.RUN_JAVA}"
           echo "RUN_ANY=${env.RUN_ANY}"
