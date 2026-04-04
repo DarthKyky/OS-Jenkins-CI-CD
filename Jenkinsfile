@@ -402,7 +402,7 @@ pipeline {
       steps {
         sh '''#!/usr/bin/env bash
           set -euo pipefail
-          rm -f vm_name.txt vm_ip.txt repo.tgz changed_files.txt || true
+          rm -f vm_name.txt vm_ip.txt repo.tgz changed_files.txt run_flags.env || true
           rm -rf reports || true
           mkdir -p reports
 
@@ -417,21 +417,38 @@ pipeline {
             git ls-tree -r --name-only HEAD | tee changed_files.txt
           fi
 
-          echo "=== Workspace tree (top 4 levels) ==="
-          find . -maxdepth 4 -type f | sort || true
-
           echo "=== changed_files.txt raw ==="
           cat changed_files.txt || true
+
+          {
+            echo "RUN_PYTHON=false"
+            echo "RUN_JAVA=false"
+            echo "RUN_ANY=false"
+          } > run_flags.env
+
+          if grep -qi '^Projects/Python/' changed_files.txt; then
+            sed -i 's/^RUN_PYTHON=false/RUN_PYTHON=true/' run_flags.env
+          fi
+
+          if grep -qi '^Projects/Java/' changed_files.txt; then
+            sed -i 's/^RUN_JAVA=false/RUN_JAVA=true/' run_flags.env
+          fi
+
+          source run_flags.env
+
+          if [[ "$RUN_PYTHON" == "true" || "$RUN_JAVA" == "true" ]]; then
+            sed -i 's/^RUN_ANY=false/RUN_ANY=true/' run_flags.env
+          fi
+
+          echo "=== run_flags.env ==="
+          cat run_flags.env
         '''
 
         script {
-          def changedFiles = fileExists('changed_files.txt') ? readFile('changed_files.txt') : ''
-
-          echo "Changed files from Groovy:\n${changedFiles}"
-
-          env.RUN_PYTHON = changedFiles.readLines().any { it.startsWith('Projects/Python/') } ? 'true' : 'false'
-          env.RUN_JAVA   = changedFiles.readLines().any { it.startsWith('Projects/Java/') } ? 'true' : 'false'
-          env.RUN_ANY    = (env.RUN_PYTHON == 'true' || env.RUN_JAVA == 'true') ? 'true' : 'false'
+          def flags = readProperties file: 'run_flags.env'
+          env.RUN_PYTHON = flags.RUN_PYTHON ?: 'false'
+          env.RUN_JAVA   = flags.RUN_JAVA ?: 'false'
+          env.RUN_ANY    = flags.RUN_ANY ?: 'false'
 
           echo "RUN_PYTHON=${env.RUN_PYTHON}"
           echo "RUN_JAVA=${env.RUN_JAVA}"
