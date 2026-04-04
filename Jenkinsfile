@@ -445,10 +445,19 @@ pipeline {
         '''
 
         script {
-          def flags = readProperties file: 'run_flags.env'
-          env.RUN_PYTHON = flags.RUN_PYTHON ?: 'false'
-          env.RUN_JAVA   = flags.RUN_JAVA ?: 'false'
-          env.RUN_ANY    = flags.RUN_ANY ?: 'false'
+          def flagsText = readFile('run_flags.env').trim()
+          def flags = [:]
+
+          flagsText.split("\\r?\\n").each { line ->
+            def parts = line.split("=", 2)
+            if (parts.length == 2) {
+              flags[parts[0].trim()] = parts[1].trim()
+            }
+          }
+
+          env.RUN_PYTHON = flags.get('RUN_PYTHON', 'false')
+          env.RUN_JAVA   = flags.get('RUN_JAVA', 'false')
+          env.RUN_ANY    = flags.get('RUN_ANY', 'false')
 
           echo "RUN_PYTHON=${env.RUN_PYTHON}"
           echo "RUN_JAVA=${env.RUN_JAVA}"
