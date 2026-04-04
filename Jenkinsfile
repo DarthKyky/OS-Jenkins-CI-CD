@@ -206,6 +206,7 @@ def runPythonTests(script) {
 
       mkdir -p ~/work && cd ~/work
       tar -xzf /tmp/repo.tgz
+      cd projects/python
       mkdir -p reports
 
       {
@@ -251,18 +252,92 @@ def runPythonTests(script) {
   '''
 }
 
-def collectArtifacts(script) {
+def runJavaTests(script) {
   script.sh '''#!/usr/bin/env bash
     set -euo pipefail
 
     IP=$(cat vm_ip.txt)
     chmod 600 "$SSH_KEY"
 
-    scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/junit.xml" reports/junit.xml
-    scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/pytest_rc.txt" reports/pytest_rc.txt
-    scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/pytest.log" reports/pytest.log || true
-    scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/bootstrap.log" reports/bootstrap.log || true
-    scp $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/reports/system-info.txt" reports/system-info.txt || true
+    git archive --format=tar.gz -o repo.tgz HEAD
+    scp $SSH_OPTS -i "$SSH_KEY" repo.tgz "$SSH_USER@$IP:/tmp/repo.tgz"
+
+    ssh $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP" '
+      set -euo pipefail
+
+      sudo apt-get update
+      sudo apt-get install -y openjdk-21-jdk maven
+
+      mkdir -p ~/work && cd ~/work
+      tar -xzf /tmp/repo.tgz
+      cd projects/java
+      mkdir -p reports
+
+      {
+        echo "=== system info ==="
+        date
+        uname -a
+        echo
+
+        echo "=== OS release ==="
+        cat /etc/os-release || true
+        echo
+
+        echo "=== memory ==="
+        free -h || true
+        echo
+
+        echo "=== disk ==="
+        df -h || true
+        echo
+
+        echo "=== java ==="
+        java -version
+        echo
+
+        echo "=== maven ==="
+        mvn -version
+      } > reports/system-info.txt 2>&1
+
+      cp reports/system-info.txt reports/bootstrap.log
+
+      set +e
+      mvn test > reports/maven-test.log 2>&1
+      MVN_RC=$?
+      echo "$MVN_RC" > reports/maven_rc.txt
+      set -e
+
+      if [[ -d target/surefire-reports ]]; then
+        cp target/surefire-reports/*.xml reports/ 2>/dev/null || true
+        cp target/surefire-reports/*.txt reports/ 2>/dev/null || true
+      fi
+
+      exit 0
+    '
+  '''
+}
+
+def collectPythonArtifacts(script) {
+  script.sh '''#!/usr/bin/env bash
+    set -euo pipefail
+
+    IP=$(cat vm_ip.txt)
+    chmod 600 "$SSH_KEY"
+    mkdir -p reports
+
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/projects/python/reports/." reports/ || true
+  '''
+}
+
+def collectJavaArtifacts(script) {
+  script.sh '''#!/usr/bin/env bash
+    set -euo pipefail
+
+    IP=$(cat vm_ip.txt)
+    chmod 600 "$SSH_KEY"
+    mkdir -p reports
+
+    scp -r $SSH_OPTS -i "$SSH_KEY" "$SSH_USER@$IP:~/work/projects/java/reports/." reports/ || true
   '''
 }
 
@@ -290,7 +365,7 @@ pipeline {
   }
 
   parameters {
-    choice(name: 'PROJECT_TYPE', choices: ['python'], description: 'Workload type for the ephemeral runner')
+    choice(name: 'PROJECT_TYPE', choices: ['python', 'java'], description: 'Workload type for the ephemeral runner')
     booleanParam(name: 'DEBUG_VERBOSE', defaultValue: false, description: 'Run extra OpenStack diagnostics')
     booleanParam(name: 'DEBUG_HOLD', defaultValue: false, description: 'Pause before cleanup to debug networking')
   }
@@ -368,6 +443,9 @@ pipeline {
             case 'python':
               runPythonTests(this)
               break
+            case 'java':
+              runJavaTests(this)
+              break
             default:
               error("Unsupported PROJECT_TYPE: ${params.PROJECT_TYPE}")
           }
@@ -377,7 +455,18 @@ pipeline {
 
     stage('Collect artifacts') {
       steps {
-        script { collectArtifacts(this) }
+        script {
+          switch (params.PROJECT_TYPE) {
+            case 'python':
+              collectPythonArtifacts(this)
+              break
+            case 'java':
+              collectJavaArtifacts(this)
+              break
+            default:
+              error("Unsupported PROJECT_TYPE: ${params.PROJECT_TYPE}")
+          }
+        }
 
         script {
           if (fileExists('reports/pytest_rc.txt')) {
@@ -386,8 +475,14 @@ pipeline {
               currentBuild.result = 'UNSTABLE'
               echo "Pytest exit code=${rc} -> marking build UNSTABLE"
             }
-          } else {
-            echo 'No reports/pytest_rc.txt found'
+          }
+
+          if (fileExists('reports/maven_rc.txt')) {
+            def rc = readFile('reports/maven_rc.txt').trim()
+            if (rc != '0') {
+              currentBuild.result = 'UNSTABLE'
+              echo "Maven exit code=${rc} -> marking build UNSTABLE"
+            }
           }
         }
       }
@@ -402,11 +497,11 @@ pipeline {
         pwd
         echo "--- reports dir ---"
         ls -la reports 2>/dev/null || true
-        echo "--- junit.xml files ---"
-        find . -maxdepth 4 -type f -name "junit.xml" -print 2>/dev/null || true
+        echo "--- xml files ---"
+        find . -maxdepth 4 -type f -name "*.xml" -print 2>/dev/null || true
       '''
 
-      junit testResults: 'reports/junit.xml', allowEmptyResults: true
+      junit testResults: 'reports/**/*.xml', allowEmptyResults: true
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
       script {
