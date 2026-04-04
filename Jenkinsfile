@@ -445,12 +445,12 @@ pipeline {
         '''
 
         script {
-          def flagsText = readFile('run_flags.env')
+          def flagsText = readFile('run_flags.env').trim()
           echo "run_flags.env from readFile:\n${flagsText}"
 
-          env.RUN_PYTHON = (flagsText =~ /(?m)^RUN_PYTHON=true$/).find() ? 'true' : 'false'
-          env.RUN_JAVA   = (flagsText =~ /(?m)^RUN_JAVA=true$/).find() ? 'true' : 'false'
-          env.RUN_ANY    = (flagsText =~ /(?m)^RUN_ANY=true$/).find() ? 'true' : 'false'
+          env.RUN_PYTHON = flagsText.contains('RUN_PYTHON=true') ? 'true' : 'false'
+          env.RUN_JAVA   = flagsText.contains('RUN_JAVA=true') ? 'true' : 'false'
+          env.RUN_ANY    = flagsText.contains('RUN_ANY=true') ? 'true' : 'false'
 
           echo "RUN_PYTHON=${env.RUN_PYTHON}"
           echo "RUN_JAVA=${env.RUN_JAVA}"
