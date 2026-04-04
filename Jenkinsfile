@@ -381,7 +381,7 @@ pipeline {
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.small'
+    FLAVOR  = 'dev.large'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
@@ -391,10 +391,6 @@ pipeline {
 
     CI_SG_NAME = 'ci-ssh'
     CI_CIDR    = '10.20.0.0/24'
-
-    RUN_PYTHON = 'false'
-    RUN_JAVA   = 'false'
-    RUN_ANY    = 'false'
   }
 
   stages {
@@ -402,7 +398,7 @@ pipeline {
       steps {
         sh '''#!/usr/bin/env bash
           set -euo pipefail
-          rm -f vm_name.txt vm_ip.txt repo.tgz changed_files.txt run_flags.env || true
+          rm -f vm_name.txt vm_ip.txt repo.tgz changed_files.txt .run_python .run_java .run_any || true
           rm -rf reports || true
           mkdir -p reports
 
@@ -420,48 +416,30 @@ pipeline {
           echo "=== changed_files.txt raw ==="
           cat changed_files.txt || true
 
-          {
-            echo "RUN_PYTHON=false"
-            echo "RUN_JAVA=false"
-            echo "RUN_ANY=false"
-          } > run_flags.env
-
           if grep -qi '^Projects/Python/' changed_files.txt; then
-            sed -i 's/^RUN_PYTHON=false/RUN_PYTHON=true/' run_flags.env
+            touch .run_python
+            echo "Python changes detected"
           fi
 
           if grep -qi '^Projects/Java/' changed_files.txt; then
-            sed -i 's/^RUN_JAVA=false/RUN_JAVA=true/' run_flags.env
+            touch .run_java
+            echo "Java changes detected"
           fi
 
-          source run_flags.env
-
-          if [[ "$RUN_PYTHON" == "true" || "$RUN_JAVA" == "true" ]]; then
-            sed -i 's/^RUN_ANY=false/RUN_ANY=true/' run_flags.env
+          if [[ -f .run_python || -f .run_java ]]; then
+            touch .run_any
+            echo "At least one runnable workload detected"
           fi
 
-          echo "=== run_flags.env ==="
-          cat run_flags.env
+          echo "=== marker files ==="
+          ls -la .run_* 2>/dev/null || true
         '''
-
-        script {
-          def flagsText = readFile('run_flags.env').trim()
-          echo "run_flags.env from readFile:\n${flagsText}"
-
-          env.RUN_PYTHON = flagsText.contains('RUN_PYTHON=true') ? 'true' : 'false'
-          env.RUN_JAVA   = flagsText.contains('RUN_JAVA=true') ? 'true' : 'false'
-          env.RUN_ANY    = flagsText.contains('RUN_ANY=true') ? 'true' : 'false'
-
-          echo "RUN_PYTHON=${env.RUN_PYTHON}"
-          echo "RUN_JAVA=${env.RUN_JAVA}"
-          echo "RUN_ANY=${env.RUN_ANY}"
-        }
       }
     }
 
     stage('Ensure CI Security Group') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { ensureCiSecurityGroup(this) }
@@ -470,7 +448,7 @@ pipeline {
 
     stage('Create ephemeral VM') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { createVm(this) }
@@ -479,7 +457,7 @@ pipeline {
 
     stage('Wait for IP on devnet') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { waitForIp(this) }
@@ -488,7 +466,7 @@ pipeline {
 
     stage('Debug OpenStack diagnostics') {
       when {
-        expression { env.RUN_ANY == 'true' && params.DEBUG_VERBOSE }
+        expression { fileExists('.run_any') && params.DEBUG_VERBOSE }
       }
       steps {
         echo 'DEBUG_VERBOSE enabled -> running OpenStack diagnostics'
@@ -498,7 +476,7 @@ pipeline {
 
     stage('Wait for SSH') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { waitForSsh(this) }
@@ -507,7 +485,7 @@ pipeline {
 
     stage('Wait for cloud-init') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { waitForCloudInit(this) }
@@ -516,7 +494,7 @@ pipeline {
 
     stage('Upload repository to VM') {
       when {
-        expression { env.RUN_ANY == 'true' }
+        expression { fileExists('.run_any') }
       }
       steps {
         script { uploadRepository(this) }
@@ -525,7 +503,7 @@ pipeline {
 
     stage('Run Python tests') {
       when {
-        expression { env.RUN_PYTHON == 'true' }
+        expression { fileExists('.run_python') }
       }
       steps {
         script { runPythonTests(this) }
@@ -534,7 +512,7 @@ pipeline {
 
     stage('Run Java tests') {
       when {
-        expression { env.RUN_JAVA == 'true' }
+        expression { fileExists('.run_java') }
       }
       steps {
         script { runJavaTests(this) }
@@ -543,7 +521,7 @@ pipeline {
 
     stage('Collect Python artifacts') {
       when {
-        expression { env.RUN_PYTHON == 'true' }
+        expression { fileExists('.run_python') }
       }
       steps {
         script { collectPythonArtifacts(this) }
@@ -562,7 +540,7 @@ pipeline {
 
     stage('Collect Java artifacts') {
       when {
-        expression { env.RUN_JAVA == 'true' }
+        expression { fileExists('.run_java') }
       }
       steps {
         script { collectJavaArtifacts(this) }
@@ -598,13 +576,13 @@ pipeline {
       archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
 
       script {
-        if (params.DEBUG_HOLD && env.RUN_ANY == 'true') {
+        if (params.DEBUG_HOLD && fileExists('.run_any')) {
           input message: 'DEBUG_HOLD=true. VM stays alive. Click Continue to run cleanup.'
         }
       }
 
       script {
-        if (env.RUN_ANY == 'true') {
+        if (fileExists('.run_any')) {
           cleanupVm(this)
         } else {
           echo 'No ephemeral VM was created; cleanup skipped.'
