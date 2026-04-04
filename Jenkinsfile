@@ -206,7 +206,7 @@ def runPythonTests(script) {
 
       mkdir -p ~/work && cd ~/work
       tar -xzf /tmp/repo.tgz
-      cd projects/python
+      cd Projects/Python
       mkdir -p reports
 
       {
