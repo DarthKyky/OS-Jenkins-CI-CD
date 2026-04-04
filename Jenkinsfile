@@ -381,7 +381,7 @@ pipeline {
 
   environment {
     IMAGE   = 'ubuntu-24.04'
-    FLAVOR  = 'dev.large'
+    FLAVOR  = 'dev.small'
     NETWORK = 'devnet'
     KEYPAIR = 'devteam-key'
 
